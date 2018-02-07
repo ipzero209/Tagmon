@@ -8,11 +8,12 @@ import shelve
 import getpass
 import datetime
 import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 import logging
 import httplib
 import xml.etree.ElementTree as ET
 
-
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
 # =========================================================
@@ -21,15 +22,18 @@ import xml.etree.ElementTree as ET
 def listener():
     """Creates a socket to listen for HTTP messages from the firewall/Panorama"""
     serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    serversocket.bind(('', 8089))
+    serversocket.bind(('', 8100))
     serversocket.listen(5) # become a server socket, maximum 5 connections
 
     while True:
         connection, address = serversocket.accept()
         buf = connection.recv(512)
         if len(buf) > 0:
-            fName =  buf[146:]
-            os.system("touch ./sources/%s" % fName)
+            buf = buf.split('\n')
+            for line in buf:
+                if "ip_is" in line:
+                    line = line.split(':')
+                    os.system("touch sources/{}".format(line[1]))
             connection.close()
 
 # End thread functions
@@ -41,35 +45,59 @@ def listener():
 # =========================================================
 # Main functions
 
+
+def checkKey(dev_IP):
+    """Checks to see if we already have an API key"""
+    if os.path.isfile('data.db'):
+        print 'Data file found: checking for API key.'
+        d = shelve.open('data.db')
+        keycheck = d.has_key('api_key')
+        if keycheck:
+            print "Existing key found. Loading key..."
+            logging.info('Existing key found. Loading key.')
+            key = d['api_key']
+            d.close()
+            return key
+        else:
+            print "Key file is missing API key. Need to regenerate key."
+            logging.critical('API key not found in data file. Regenerating key.')
+            key = getAPIKey(dev_IP)
+            return key
+    else:
+        print "No data file found. Please generate and API key."
+        key = getAPIKey(dev_IP)
+        return key
+
+
 def getAPIKey(this_IP):
     """Generates an API key for use in subsequent calls"""
-    # if os.path.isfile('data'):
-    #     print "Keyfile found. Deleting old Key.\n\n\n"
-    #     os.remove('data')
     pano_user = raw_input("Enter your username: ")
     pano_pass = getpass.getpass("Enter your password:")
     command = "/api/?type=keygen&user=" + pano_user + "&password=" + pano_pass
-    req_conn = httplib.HTTPSConnection(this_IP)
-    req_conn.request("GET", command)
-    response = req_conn.getresponse()
-    xml_resp = response.read()
-    root = ET.fromstring(xml_resp)
-    # print "Your new API Key is: " + root[0][0].text
-    new_key = root[0][0].text
+    key_params = {"type" : "keygen",
+                  "user" : pano_user,
+                  "password" : pano_pass}
+    key_req = requests.get("https://{}/api/?".format(this_IP), params=key_params, verify=False)
+    key_xml = ET.fromstring(key_req.content)
+    new_key = key_xml.find('./result/key').text
     d = shelve.open('data')
     d['api_key'] = new_key
     d.close
     return new_key
 
 
-
 def remove_tag(pan_IP, tag_IP, tag, key):
     """Removes a previously tagged IP address"""
     logging.info('Removing tag for %s', tag_IP)
-    command = "http://" + pan_IP + "/api/?type=user-id&vsys=vsys1&cmd=<uid-message><version>1.0</version><type>update</type><payload><unregister><entry ip=\"" + tag_IP + "\"><tag><member>" + tag + "</member></tag></entry></unregister></payload></uid-message>&key=" + key
-    response = requests.request('GET', command)
+    cmd = "<uid-message><version>1.0</version><type>update</type><payload><unregister>" \
+          "<entry ip=\"{}\"><tag><member>{}</member></tag></entry></unregister>" \
+          "</payload></uid-message>".format(tag_IP, tag)
+    tag_params = {"type" : "user-id",
+                  "vsys" : "vsys1",
+                  "cmd" : cmd,
+                  "key" : key}
+    response = requests.get("https://{}/api/?".format(pan_IP), params=tag_params, verify=False)
     return
-
 
 
 # =========================================================
@@ -90,7 +118,7 @@ tag_name = raw_input('What is the tag name:? ')
 expiry = raw_input('Number of hours to keep tags active for an entry: ')
 exp_int = int(expiry)
 
-api_key = getAPIKey(dev_IP)
+api_key = checkKey(dev_IP)
 
 
 listener_thread = Thread(target=listener)
@@ -99,26 +127,7 @@ logging.info('Started listener thread.')
 
 
 
-# Check to see if we have an API key already. If we do, load it.
 
-# if os.path.isfile('data.db'):
-#     print 'Data file found: checking for API key.'
-#     d = shelve.open('data.db')
-#     #keycheck = d.has_key('api_key')
-#     try:
-#         api_key = d['api_key']
-#         print "Existing API key loaded."
-#         sleep(2)
-#         d.close
-#     except Exception:
-#         print "No API key found. We will generate one now."
-#         sleep(3)
-#         api_key = getAPIKey(dev_IP)
-# else:
-#     print "No data file found. Please generate and API key."
-#     api_key = getAPIKey(dev_IP)
-
-api_key = getAPIKey(dev_IP)
 
 while True:
     logging.info('Beginning cleanup of old entries.')
@@ -135,4 +144,4 @@ while True:
                 os.remove("./sources/%s" % item)
             else:
                 logging.info('%s is still within quarantine period.' % item)
-    time.sleep(150)
+    time.sleep(3600)
